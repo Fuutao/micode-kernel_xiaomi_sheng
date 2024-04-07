@@ -30,13 +30,15 @@
 #include "ufshcd.h"
 #include "ufshcd-pltfrm.h"
 #include "unipro.h"
-#include "ufs-qcom.h"
 
 #define CREATE_TRACE_POINTS
 #include "ufs-qcom-trace.h"
 
+
+#include "ufs-qcom.h"
 #include "ufshci.h"
 #include "ufs_quirks.h"
+
 #include "ufshcd-crypto-qti.h"
 
 #define UFS_QCOM_DEFAULT_DBG_PRINT_EN	\
@@ -166,6 +168,7 @@ static int ufs_qcom_unvote_qos_all(struct ufs_hba *hba);
 static void ufs_qcom_parse_g4_workaround_flag(struct ufs_qcom_host *host);
 static int ufs_qcom_mod_min_cpufreq(unsigned int cpu, s32 new_val);
 static int ufs_qcom_config_shared_ice(struct ufs_qcom_host *host);
+
 static int ufs_qcom_ber_threshold_set(const char *val, const struct kernel_param *kp);
 static int ufs_qcom_ber_duration_set(const char *val, const struct kernel_param *kp);
 static void ufs_qcom_ber_mon_init(struct ufs_hba *hba);
@@ -1577,10 +1580,12 @@ static void ufs_qcom_cpufreq_dwork(struct work_struct *work)
 
 	if (cur_thres > NUM_REQS_HIGH_THRESH && !host->cur_freq_vote) {
 		freq_val = host->max_cpu_scale_freq;
-		ufs_qcom_toggle_pri_affinity(host->hba, true);
+		if (host->irq_affinity_support)
+			ufs_qcom_toggle_pri_affinity(host->hba, true);
 	} else if (cur_thres < NUM_REQS_LOW_THRESH && host->cur_freq_vote) {
 		freq_val = host->min_cpu_scale_freq;
-		ufs_qcom_toggle_pri_affinity(host->hba, false);
+		if (host->irq_affinity_support)
+			ufs_qcom_toggle_pri_affinity(host->hba, false);
 	}
 
 	if (freq_val == -1)
@@ -2083,6 +2088,7 @@ static int ufs_qcom_bus_register(struct ufs_qcom_host *host)
 
 static void ufs_qcom_dev_ref_clk_ctrl(struct ufs_qcom_host *host, bool enable)
 {
+
 	if (host->dev_ref_clk_ctrl_mmio &&
 	    (enable ^ host->is_dev_ref_clk_enabled)) {
 		u32 temp = readl_relaxed(host->dev_ref_clk_ctrl_mmio);
@@ -2131,7 +2137,7 @@ static void ufs_qcom_dev_ref_clk_ctrl(struct ufs_qcom_host *host, bool enable)
 		 * exit command.
 		 */
 		if (enable)
-			usleep_range(50, 60);
+			usleep_range(1000, 1100);
 
 		host->is_dev_ref_clk_enabled = enable;
 	}
@@ -2147,6 +2153,7 @@ static int ufs_qcom_pwr_change_notify(struct ufs_hba *hba,
 	struct phy *phy = host->generic_phy;
 struct ufs_qcom_dev_params ufs_qcom_cap;
 	int ret = 0;
+
 
 	if (!dev_req_params) {
 		ufs_qcom_msg(ERR, NULL, "%s: incoming dev_req_params is NULL\n", __func__);
@@ -2430,6 +2437,7 @@ static void ufs_qcom_advertise_quirks(struct ufs_hba *hba)
 {
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 
+
 	if (host->hw_ver.major == 0x01) {
 		hba->quirks |= UFSHCD_QUIRK_DELAY_BEFORE_DME_CMDS
 			    | UFSHCD_QUIRK_BROKEN_PA_RXHSUNTERMCAP
@@ -2453,6 +2461,8 @@ static void ufs_qcom_advertise_quirks(struct ufs_hba *hba)
 
 	if (host->disable_lpm)
 		hba->quirks |= UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8;
+
+
 
 #if IS_ENABLED(CONFIG_SCSI_UFS_CRYPTO_QTI)
 	hba->quirks |= UFSHCD_QUIRK_CUSTOM_KEYSLOT_MANAGER;
@@ -2497,6 +2507,8 @@ static void ufs_qcom_set_caps(struct ufs_hba *hba)
 
 	if (host->hw_ver.major >= 0x5)
 		host->caps |= UFS_QCOM_CAP_SHARED_ICE;
+
+
 }
 
 static int ufs_qcom_unvote_qos_all(struct ufs_hba *hba)
@@ -2587,7 +2599,6 @@ static int ufs_qcom_setup_clocks(struct ufs_hba *hba, bool on,
 					return err;
 				}
 				ufs_qcom_dev_ref_clk_ctrl(host, false);
-
 				clk_disable_unprepare(host->ref_clki->clk);
 				host->ref_clki->enabled = on;
 			}
@@ -3288,6 +3299,9 @@ static void ufs_qcom_parse_irq_affinity(struct ufs_hba *hba)
 			host->def_mask.bits[0] = UFS_QCOM_IRQ_SLVR_MASK;
 		}
 	}
+	/* If device includes perf mask, enable dynamic irq affinity feature */
+	if (host->perf_mask.bits[0])
+		host->irq_affinity_support = true;
 }
 
 static void ufs_qcom_parse_pm_level(struct ufs_hba *hba)
@@ -3352,8 +3366,8 @@ static int ufs_qcom_set_cur_therm_state(struct thermal_cooling_device *tcd,
 	switch (data) {
 	case UFS_QCOM_LVL_NO_THERM:
 		ufs_qcom_msg(WARN, tcd->devdata, "UFS host thermal mitigation stops\n");
-
-		atomic_set(&host->therm_mitigation, 0);
+		if (host->irq_affinity_support)
+			atomic_set(&host->therm_mitigation, 0);
 
 		/* Set the default auto-hiberate idle timer to 5 ms */
 		ufshcd_auto_hibern8_update(hba, ufs_qcom_us_to_ahit(5000));
@@ -3368,10 +3382,12 @@ static int ufs_qcom_set_cur_therm_state(struct thermal_cooling_device *tcd,
 		ufs_qcom_msg(WARN, tcd->devdata,
 			"Going into UFS host thermal mitigation state, performance may be impacted before UFS host thermal mitigation stops\n");
 
-		/* Stop setting hi-pri to requests and set irq affinity to default value */
-		atomic_set(&host->therm_mitigation, 1);
-		cancel_dwork_unvote_cpufreq(hba);
-		ufs_qcom_toggle_pri_affinity(hba, false);
+		if (host->irq_affinity_support) {
+			/* Stop setting hi-pri to requests and set irq affinity to default value */
+			atomic_set(&host->therm_mitigation, 1);
+			cancel_dwork_unvote_cpufreq(hba);
+			ufs_qcom_toggle_pri_affinity(hba, false);
+		}
 		/* Set the default auto-hiberate idle timer to 1 ms */
 		ufshcd_auto_hibern8_update(hba, ufs_qcom_us_to_ahit(1000));
 
@@ -4172,7 +4188,7 @@ static bool ufs_qcom_cal_ber(struct ufs_qcom_host *host, struct ufs_qcom_ber_his
 	int idx_start, idx_end, i;
 	s64 total_run_time = 0;
 	s64 total_full_time = 0;
-	u32 gear = h->gear[h->pos-1];
+	u32 gear = h->gear[(h->pos + UFS_QCOM_EVT_LEN -1) % UFS_QCOM_EVT_LEN];
 
 	if (!override_ber_threshold)
 		ber_threshold = ber_table[gear].ber_threshold;
@@ -4598,6 +4614,8 @@ static void ufs_qcom_parse_limits(struct ufs_qcom_host *host)
 	u32 val;
 	u32 dev_major = 0, dev_minor = 0;
 
+
+
 	if (!np)
 		return;
 
@@ -4637,6 +4655,8 @@ static void ufs_qcom_parse_limits(struct ufs_qcom_host *host)
 	of_property_read_u32(np, "limit-rx-pwm-gear", &host->limit_rx_pwm_gear);
 	of_property_read_u32(np, "limit-rate", &host->limit_rate);
 	of_property_read_u32(np, "limit-phy-submode", &host->limit_phy_submode);
+
+
 }
 
 /*
@@ -4661,6 +4681,7 @@ static void ufs_qcom_parse_lpm(struct ufs_qcom_host *host)
 	struct device_node *node = host->hba->dev->of_node;
 
 	host->disable_lpm = of_property_read_bool(node, "qcom,disable-lpm");
+
 	if (host->disable_lpm)
 		ufs_qcom_msg(INFO, host->hba->dev, "(%s) All LPM is disabled\n",
 			 __func__);
@@ -5004,6 +5025,52 @@ static ssize_t ber_th_exceeded_show(struct device *dev,
 
 static DEVICE_ATTR_RO(ber_th_exceeded);
 
+static ssize_t irq_affinity_support_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
+	bool value;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EACCES;
+
+	if (kstrtobool(buf, &value))
+		return -EINVAL;
+
+	/* if current irq_affinity_support is same as requested one, don't proceed */
+	if (value == host->irq_affinity_support)
+		goto out;
+
+	/* if perf-mask is not set, don't proceed */
+	if (!host->perf_mask.bits[0])
+		goto out;
+
+	host->irq_affinity_support = !!value;
+	/* Reset cpu affinity accordingly */
+	if (host->irq_affinity_support)
+		ufs_qcom_set_affinity_hint(hba, true);
+	else
+		ufs_qcom_set_affinity_hint(hba, false);
+
+	return count;
+
+out:
+	return -EINVAL;
+}
+
+static ssize_t irq_affinity_support_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", !!host->irq_affinity_support);
+}
+
+static DEVICE_ATTR_RW(irq_affinity_support);
+
 static struct attribute *ufs_qcom_sysfs_attrs[] = {
 	&dev_attr_err_state.attr,
 	&dev_attr_power_mode.attr,
@@ -5014,6 +5081,7 @@ static struct attribute *ufs_qcom_sysfs_attrs[] = {
 	&dev_attr_crash_on_err.attr,
 	&dev_attr_hibern8_count.attr,
 	&dev_attr_ber_th_exceeded.attr,
+	&dev_attr_irq_affinity_support.attr,
 	NULL
 };
 
@@ -5042,6 +5110,7 @@ static void ufs_qcom_hook_send_command(void *param, struct ufs_hba *hba,
 	if (lrbp && lrbp->cmd && lrbp->cmd->cmnd[0]) {
 		struct request *rq = scsi_cmd_to_rq(lrbp->cmd);
 		int sz = rq ? blk_rq_sectors(rq) : 0;
+
 		ufs_qcom_log_str(host, "<,%x,%d,%x,%d\n",
 				lrbp->cmd->cmnd[0],
 				lrbp->task_tag,
@@ -5055,7 +5124,7 @@ static void ufs_qcom_hook_send_command(void *param, struct ufs_hba *hba,
 					ufshcd_readl(hba,
 						REG_UTP_TRANSFER_REQ_DOOR_BELL),
 					sz);
-		if (atomic_read(&host->hi_pri_en) && rq)
+		if ((host->irq_affinity_support) && atomic_read(&host->hi_pri_en) && rq)
 			rq->cmd_flags |= REQ_HIPRI;
 	}
 }
@@ -5069,6 +5138,7 @@ static void ufs_qcom_hook_compl_command(void *param, struct ufs_hba *hba,
 	if (lrbp && lrbp->cmd) {
 		int sz = scsi_cmd_to_rq(lrbp->cmd) ?
 				blk_rq_sectors(scsi_cmd_to_rq(lrbp->cmd)) : 0;
+
 		ufs_qcom_log_str(host, ">,%x,%d,%x,%d\n",
 				lrbp->cmd->cmnd[0],
 				lrbp->task_tag,
@@ -5246,6 +5316,7 @@ static int ufs_qcom_probe(struct platform_device *pdev)
 	 * Hence, check for the connected device early-on & don't turn-off
 	 * the regulators.
 	 */
+
 
 	/*
 	 *Defer secondary UFS device probe if all the LUNS of

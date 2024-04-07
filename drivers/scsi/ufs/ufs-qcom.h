@@ -450,6 +450,7 @@ static inline void get_alg2_grp_params(unsigned int group, int *core, int *task)
 	 __get_alg2_grp_params(p->val, core, task);
 }
 
+
 /**
  * struct ufs_qcom_ber_hist - record the detail of each BER event.
  * @pos: index of event.
@@ -607,6 +608,7 @@ struct ufs_qcom_host {
 	struct list_head regs_list_head;
 	bool ber_th_exceeded;
 	u32 valid_evt_cnt[UFS_EVT_CNT];
+	bool irq_affinity_support;
 };
 
 static inline u32
